@@ -480,6 +480,10 @@ impl<'d> Espi<'d> {
                 .intspc3()
                 .clear_bit_by_one()
         });
+
+        // REVISIT: it's unclear if this is really needed, but it sure
+        // helps getting things working.
+        self.info.regs.port(port).irulestat().write(|w| w.srst().set_bit());
     }
 
     /// Wait for controller event
