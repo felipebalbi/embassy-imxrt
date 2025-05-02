@@ -13,6 +13,7 @@ use super::{
     MasterDma, Mode, Result, SclPin, SdaPin, TransferError, I2C_REMEDIATION, I2C_WAKERS, REMEDIATON_MASTER_STOP,
     TEN_BIT_PREFIX,
 };
+use crate::dma::AnyChannel;
 use crate::flexcomm::FlexcommRef;
 use crate::interrupt::typelevel::Interrupt;
 use crate::pac::i2c0::msttime::{Mstsclhigh, Mstscllow};
@@ -152,7 +153,7 @@ pub struct I2cMaster<'a, M: Mode> {
     info: Info,
     _flexcomm: FlexcommRef,
     _phantom: PhantomData<M>,
-    dma_ch: Option<dma::channel::Channel<'a>>,
+    dma_ch: Option<Peri<'a, AnyChannel>>,
 }
 
 /// Represents a duty cycle (percentage of time to hold the SCL line high per bit).  Fitting is best-effort / not exact.
@@ -227,7 +228,7 @@ impl<'a, M: Mode> I2cMaster<'a, M> {
         sda: Peri<'a, impl SdaPin<T>>,
         // TODO - integrate clock APIs to allow dynamic freq selection | clock: crate::flexcomm::Clock,
         config: Config,
-        dma_ch: Option<dma::channel::Channel<'a>>,
+        dma_ch: Option<Peri<'a, AnyChannel>>,
     ) -> Result<Self> {
         // TODO - clock integration
         let clock = crate::flexcomm::Clock::Sfro;
@@ -485,8 +486,7 @@ impl<'a> I2cMaster<'a, Async> {
         dma_ch: Peri<'a, impl MasterDma<T>>,
     ) -> Result<Self> {
         force_clear_remediation(&T::info());
-        let ch = dma::Dma::reserve_channel(dma_ch);
-        let this = Self::new_inner::<T>(fc, scl, sda, config, ch)?;
+        let this = Self::new_inner::<T>(fc, scl, sda, config, Some(dma_ch.into()))?;
 
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
@@ -680,12 +680,8 @@ impl<'a> I2cMaster<'a, Async> {
 
         if self.dma_ch.is_some() {
             if !dma_read.is_empty() {
-                let transfer = dma::transfer::Transfer::new_read(
-                    self.dma_ch.as_mut().unwrap(),
-                    i2cregs.mstdat().as_ptr() as *mut u8,
-                    dma_read,
-                    Default::default(),
-                );
+                let ch = self.dma_ch.as_mut().unwrap().reborrow();
+                let transfer = unsafe { dma::read(ch, i2cregs.mstdat().as_ptr() as *mut u8, dma_read) };
 
                 // According to sections 24.7.7.1 and 24.7.7.2, we should
                 // first program the DMA channel for carrying out a transfer
@@ -828,12 +824,8 @@ impl<'a> I2cMaster<'a, Async> {
         }
 
         if self.dma_ch.is_some() {
-            let transfer = dma::transfer::Transfer::new_write(
-                self.dma_ch.as_mut().unwrap(),
-                write,
-                i2cregs.mstdat().as_ptr() as *mut u8,
-                Default::default(),
-            );
+            let ch = self.dma_ch.as_mut().unwrap().reborrow();
+            let transfer = unsafe { dma::write(ch, write, i2cregs.mstdat().as_ptr() as *mut u8) };
 
             // According to sections 24.7.7.1 and 24.7.7.2, we should
             // first program the DMA channel for carrying out a transfer

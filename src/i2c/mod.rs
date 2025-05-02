@@ -343,11 +343,11 @@ impl_sda!(PIOFC15_SDA, F1, FLEXCOMM15);
 
 /// I2C Master DMA trait.
 #[allow(private_bounds)]
-pub trait MasterDma<T: Instance>: dma::Instance {}
+pub trait MasterDma<T: Instance>: dma::Channel {}
 
 /// I2C Slave DMA trait.
 #[allow(private_bounds)]
-pub trait SlaveDma<T: Instance>: dma::Instance {}
+pub trait SlaveDma<T: Instance>: dma::Channel {}
 
 macro_rules! impl_dma {
     ($fcn:ident, $mode:ident, $dma:ident) => {
@@ -380,21 +380,3 @@ impl_dma!(FLEXCOMM6, Master, DMA0_CH13);
 
 impl_dma!(FLEXCOMM7, Slave, DMA0_CH14);
 impl_dma!(FLEXCOMM7, Master, DMA0_CH15);
-
-macro_rules! impl_nodma {
-    ($fcn:ident, $mode:ident) => {
-        paste! {
-            impl [<$mode Dma>]<crate::peripherals::$fcn> for crate::dma::NoDma {}
-        }
-    };
-}
-
-impl_nodma!(FLEXCOMM0, Master);
-impl_nodma!(FLEXCOMM1, Master);
-impl_nodma!(FLEXCOMM2, Master);
-impl_nodma!(FLEXCOMM3, Master);
-impl_nodma!(FLEXCOMM4, Master);
-impl_nodma!(FLEXCOMM5, Master);
-impl_nodma!(FLEXCOMM6, Master);
-impl_nodma!(FLEXCOMM7, Master);
-impl_nodma!(FLEXCOMM15, Master);

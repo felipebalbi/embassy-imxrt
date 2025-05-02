@@ -8,12 +8,12 @@ use core::task::{Context, Poll};
 
 use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_sync::waitqueue::AtomicWaker;
-use sealed::Sealed;
 
 use crate::clocks::enable_and_reset;
 use crate::iopctl::IopctlPin;
 pub use crate::iopctl::{AnyPin, DriveMode, DriveStrength, Function, Inverter, Pull, SlewRate};
-use crate::{interrupt, peripherals, Peri, PeripheralType};
+use crate::sealed::Sealed;
+use crate::{interrupt, peripherals, BitIter, Peri, PeripheralType};
 
 // This should be unique per IMXRT package
 const PORT_COUNT: usize = 8;
@@ -64,24 +64,6 @@ fn GPIO_INTA() {
 }
 
 #[cfg(feature = "rt")]
-struct BitIter(u32);
-
-#[cfg(feature = "rt")]
-impl Iterator for BitIter {
-    type Item = u32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.0.trailing_zeros() {
-            32 => None,
-            b => {
-                self.0 &= !(1 << b);
-                Some(b)
-            }
-        }
-    }
-}
-
-#[cfg(feature = "rt")]
 fn irq_handler(port_wakers: &[Option<&PortWaker>]) {
     let reg = unsafe { crate::pac::Gpio::steal() };
 
@@ -127,10 +109,6 @@ pub(crate) fn init() {
     // will trigger until a pin is configured as Input, which can only
     // happen after initialization of the HAL
     unsafe { interrupt::GPIO_INTA.enable() };
-}
-
-mod sealed {
-    pub trait Sealed {}
 }
 
 /// Input Sense mode.

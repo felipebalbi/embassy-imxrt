@@ -2,6 +2,7 @@
 
 use core::future::poll_fn;
 use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU8, Ordering};
 use core::task::Poll;
 
 use embassy_futures::select::{select, Either};
@@ -10,33 +11,32 @@ use embassy_hal_internal::{Peri, PeripheralType};
 use embassy_sync::waitqueue::AtomicWaker;
 use paste::paste;
 
-use crate::dma::channel::Channel;
-use crate::dma::transfer::Transfer;
+use crate::dma::AnyChannel;
 use crate::flexcomm::{Clock, FlexcommRef};
 use crate::gpio::{AnyPin, GpioPin as Pin};
 use crate::interrupt::typelevel::Interrupt;
 use crate::iopctl::{DriveMode, DriveStrength, Inverter, IopctlPin, Pull, SlewRate};
 use crate::pac::usart0::cfg::{Clkpol, Datalen, Loop, Paritysel as Parity, Stoplen, Syncen, Syncmst};
 use crate::pac::usart0::ctl::Cc;
+use crate::sealed::Sealed;
 use crate::{dma, interrupt};
 
 /// Driver move trait.
 #[allow(private_bounds)]
-pub trait Mode: sealed::Sealed {}
+pub trait Mode: Sealed {}
 
 /// Blocking mode.
 pub struct Blocking;
-impl sealed::Sealed for Blocking {}
+impl Sealed for Blocking {}
 impl Mode for Blocking {}
 
 /// Async mode.
 pub struct Async;
-impl sealed::Sealed for Async {}
+impl Sealed for Async {}
 impl Mode for Async {}
 
 /// Uart driver.
 pub struct Uart<'a, M: Mode> {
-    info: Info,
     tx: UartTx<'a, M>,
     rx: UartRx<'a, M>,
 }
@@ -45,7 +45,7 @@ pub struct Uart<'a, M: Mode> {
 pub struct UartTx<'a, M: Mode> {
     info: Info,
     _flexcomm: FlexcommRef,
-    _tx_dma: Option<Channel<'a>>,
+    _tx_dma: Option<Peri<'a, AnyChannel>>,
     _phantom: PhantomData<(&'a (), M)>,
 }
 
@@ -53,7 +53,7 @@ pub struct UartTx<'a, M: Mode> {
 pub struct UartRx<'a, M: Mode> {
     info: Info,
     _flexcomm: FlexcommRef,
-    _rx_dma: Option<Channel<'a>>,
+    _rx_dma: Option<Peri<'a, AnyChannel>>,
     _phantom: PhantomData<(&'a (), M)>,
 }
 
@@ -141,12 +141,40 @@ pub enum Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 impl<'a, M: Mode> UartTx<'a, M> {
-    fn new_inner<T: Instance>(_flexcomm: FlexcommRef, _tx_dma: Option<Channel<'a>>) -> Self {
-        Self {
+    fn new_inner<T: Instance>(_flexcomm: FlexcommRef, _tx_dma: Option<Peri<'a, AnyChannel>>) -> Self {
+        let uarttx = Self {
             info: T::info(),
             _flexcomm,
             _tx_dma,
             _phantom: PhantomData,
+        };
+        uarttx.info.refcnt.fetch_add(1, Ordering::Relaxed);
+        uarttx
+    }
+}
+
+impl<'a, M: Mode> Drop for UartTx<'a, M> {
+    fn drop(&mut self) {
+        if self.info.refcnt.fetch_sub(1, Ordering::Relaxed) == 1 {
+            while self.info.regs.stat().read().txidle().bit_is_clear() {}
+
+            self.info.regs.fifointenclr().modify(|_, w| {
+                w.txerr()
+                    .set_bit()
+                    .rxerr()
+                    .set_bit()
+                    .txlvl()
+                    .set_bit()
+                    .rxlvl()
+                    .set_bit()
+            });
+
+            self.info
+                .regs
+                .fifocfg()
+                .modify(|_, w| w.dmatx().clear_bit().dmarx().clear_bit());
+
+            self.info.regs.cfg().modify(|_, w| w.enable().disabled());
         }
     }
 }
@@ -194,7 +222,8 @@ impl<'a> UartTx<'a, Blocking> {
         Ok(())
     }
 
-    /// Transmit the provided buffer.
+    /// Transmit the provided buffer. Non-blocking version, bails out
+    /// if it would block.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         for x in buf {
             self.write_byte(*x)?;
@@ -220,12 +249,40 @@ impl<'a> UartTx<'a, Blocking> {
 }
 
 impl<'a, M: Mode> UartRx<'a, M> {
-    fn new_inner<T: Instance>(_flexcomm: FlexcommRef, _rx_dma: Option<Channel<'a>>) -> Self {
-        Self {
+    fn new_inner<T: Instance>(_flexcomm: FlexcommRef, _rx_dma: Option<Peri<'a, AnyChannel>>) -> Self {
+        let uartrx = Self {
             info: T::info(),
             _flexcomm,
             _rx_dma,
             _phantom: PhantomData,
+        };
+        uartrx.info.refcnt.fetch_add(1, Ordering::Relaxed);
+        uartrx
+    }
+}
+
+impl<'a, M: Mode> Drop for UartRx<'a, M> {
+    fn drop(&mut self) {
+        if self.info.refcnt.fetch_sub(1, Ordering::Relaxed) == 1 {
+            while self.info.regs.stat().read().rxidle().bit_is_clear() {}
+
+            self.info.regs.fifointenclr().modify(|_, w| {
+                w.txerr()
+                    .set_bit()
+                    .rxerr()
+                    .set_bit()
+                    .txlvl()
+                    .set_bit()
+                    .rxlvl()
+                    .set_bit()
+            });
+
+            self.info
+                .regs
+                .fifocfg()
+                .modify(|_, w| w.dmatx().clear_bit().dmarx().clear_bit());
+
+            self.info.regs.cfg().modify(|_, w| w.enable().disabled());
         }
     }
 }
@@ -275,7 +332,8 @@ impl UartRx<'_, Blocking> {
         self.read_byte_internal()
     }
 
-    /// Read from UART RX.
+    /// Read from UART RX. Non-blocking version, bails out if it would
+    /// block.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
         for b in buf.iter_mut() {
             *b = self.read_byte()?;
@@ -434,37 +492,6 @@ impl<'a, M: Mode> Uart<'a, M> {
         regs.cfg().modify(|_, w| w.enable().enabled());
     }
 
-    /// Deinitializes a USART instance.
-    pub fn deinit(&self) -> Result<()> {
-        // This function waits for TX complete, disables TX and RX, and disables the USART clock
-        while self.info.regs.stat().read().txidle().bit_is_clear() {
-            // When 0, indicates that the transmitter is currently in the process of sending data.
-        }
-
-        // Disable interrupts
-        self.info.regs.fifointenclr().modify(|_, w| {
-            w.txerr()
-                .set_bit()
-                .rxerr()
-                .set_bit()
-                .txlvl()
-                .set_bit()
-                .rxlvl()
-                .set_bit()
-        });
-
-        // Disable dma requests
-        self.info
-            .regs
-            .fifocfg()
-            .modify(|_, w| w.dmatx().clear_bit().dmarx().clear_bit());
-
-        // Disable peripheral
-        self.info.regs.cfg().modify(|_, w| w.enable().disabled());
-
-        Ok(())
-    }
-
     /// Split the Uart into a transmitter and receiver, which is particularly
     /// useful when having two tasks correlating to transmitting and receiving.
     pub fn split(self) -> (UartTx<'a, M>, UartRx<'a, M>) {
@@ -493,7 +520,6 @@ impl<'a> Uart<'a, Blocking> {
         let flexcomm = Self::init::<T>(Some(tx.into()), Some(rx.into()), None, None, config)?;
 
         Ok(Self {
-            info: T::info(),
             tx: UartTx::new_inner::<T>(flexcomm.clone(), None),
             rx: UartRx::new_inner::<T>(flexcomm, None),
         })
@@ -504,7 +530,8 @@ impl<'a> Uart<'a, Blocking> {
         self.rx.blocking_read(buf)
     }
 
-    /// Read from UART Rx.
+    /// Read from UART RX. Non-blocking version, bails out if it would
+    /// block.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<()> {
         self.rx.read(buf)
     }
@@ -514,7 +541,8 @@ impl<'a> Uart<'a, Blocking> {
         self.tx.blocking_write(buf)
     }
 
-    /// Transmit the provided buffer.
+    /// Transmit the provided buffer. Non-blocking version, bails out
+    /// if it would block.
     pub fn write(&mut self, buf: &[u8]) -> Result<()> {
         self.tx.write(buf)
     }
@@ -546,9 +574,7 @@ impl<'a> UartTx<'a, Async> {
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
 
-        let tx_dma = dma::Dma::reserve_channel(tx_dma);
-
-        Ok(Self::new_inner::<T>(flexcomm, tx_dma))
+        Ok(Self::new_inner::<T>(flexcomm, Some(tx_dma.into())))
     }
 
     /// Transmit the provided buffer asynchronously.
@@ -563,12 +589,8 @@ impl<'a> UartTx<'a, Async> {
         for chunk in buf.chunks(1024) {
             regs.fifocfg().modify(|_, w| w.dmatx().enabled());
 
-            let transfer = Transfer::new_write(
-                self._tx_dma.as_ref().unwrap(),
-                chunk,
-                regs.fifowr().as_ptr() as *mut u8,
-                Default::default(),
-            );
+            let ch = self._tx_dma.as_mut().unwrap().reborrow();
+            let transfer = unsafe { dma::write(ch, chunk, regs.fifowr().as_ptr() as *mut u8) };
 
             let res = select(
                 transfer,
@@ -679,29 +701,23 @@ impl<'a> UartRx<'a, Async> {
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
 
-        let rx_dma = dma::Dma::reserve_channel(rx_dma);
-
-        Ok(Self::new_inner::<T>(flexcomm, rx_dma))
+        Ok(Self::new_inner::<T>(flexcomm, Some(rx_dma.into())))
     }
 
     /// Read from UART RX asynchronously.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<()> {
         let regs = self.info.regs;
 
+        // Disable DMA on completion/cancellation
+        let _dma_guard = OnDrop::new(|| {
+            regs.fifocfg().modify(|_, w| w.dmarx().disabled());
+        });
+
         for chunk in buf.chunks_mut(1024) {
             regs.fifocfg().modify(|_, w| w.dmarx().enabled());
 
-            let transfer = Transfer::new_read(
-                self._rx_dma.as_ref().unwrap(),
-                regs.fiford().as_ptr() as *mut u8,
-                chunk,
-                Default::default(),
-            );
-
-            // Disable DMA on completion/cancellation
-            let _dma_guard = OnDrop::new(|| {
-                regs.fifocfg().modify(|_, w| w.dmarx().disabled());
-            });
+            let ch = self._rx_dma.as_mut().unwrap().reborrow();
+            let transfer = unsafe { dma::read(ch, regs.fiford().as_ptr() as *const u8, chunk) };
 
             let res = select(
                 transfer,
@@ -777,15 +793,11 @@ impl<'a> Uart<'a, Async> {
         T::Interrupt::unpend();
         unsafe { T::Interrupt::enable() };
 
-        let tx_dma = dma::Dma::reserve_channel(tx_dma);
-        let rx_dma = dma::Dma::reserve_channel(rx_dma);
-
         let flexcomm = Self::init::<T>(Some(tx.into()), Some(rx.into()), None, None, config)?;
 
         Ok(Self {
-            info: T::info(),
-            tx: UartTx::new_inner::<T>(flexcomm.clone(), tx_dma),
-            rx: UartRx::new_inner::<T>(flexcomm, rx_dma),
+            tx: UartTx::new_inner::<T>(flexcomm.clone(), Some(tx_dma.into())),
+            rx: UartRx::new_inner::<T>(flexcomm, Some(rx_dma.into())),
         })
     }
 
@@ -811,9 +823,6 @@ impl<'a> Uart<'a, Async> {
         let rts = rts.into();
         let cts = cts.into();
 
-        let tx_dma = dma::Dma::reserve_channel(tx_dma);
-        let rx_dma = dma::Dma::reserve_channel(rx_dma);
-
         let flexcomm = Self::init::<T>(
             Some(tx.into()),
             Some(rx.into()),
@@ -823,9 +832,8 @@ impl<'a> Uart<'a, Async> {
         )?;
 
         Ok(Self {
-            info: T::info(),
-            tx: UartTx::new_inner::<T>(flexcomm.clone(), tx_dma),
-            rx: UartRx::new_inner::<T>(flexcomm, rx_dma),
+            tx: UartTx::new_inner::<T>(flexcomm.clone(), Some(tx_dma.into())),
+            rx: UartRx::new_inner::<T>(flexcomm, Some(rx_dma.into())),
         })
     }
 
@@ -993,103 +1001,10 @@ impl embedded_hal_nb::serial::Write for Uart<'_, Blocking> {
     }
 }
 
-impl embedded_io::Error for Error {
-    fn kind(&self) -> embedded_io::ErrorKind {
-        embedded_io::ErrorKind::Other
-    }
-}
-
-impl embedded_io::ErrorType for UartRx<'_, Blocking> {
-    type Error = Error;
-}
-
-impl embedded_io::ErrorType for UartTx<'_, Blocking> {
-    type Error = Error;
-}
-
-impl embedded_io::ErrorType for Uart<'_, Blocking> {
-    type Error = Error;
-}
-
-impl embedded_io::Read for UartRx<'_, Blocking> {
-    fn read(&mut self, buf: &mut [u8]) -> core::result::Result<usize, Self::Error> {
-        self.blocking_read(buf).map(|_| buf.len())
-    }
-}
-
-impl embedded_io::Write for UartTx<'_, Blocking> {
-    fn write(&mut self, buf: &[u8]) -> core::result::Result<usize, Self::Error> {
-        self.blocking_write(buf).map(|_| buf.len())
-    }
-
-    fn flush(&mut self) -> core::result::Result<(), Self::Error> {
-        self.blocking_flush()
-    }
-}
-
-impl embedded_io::Read for Uart<'_, Blocking> {
-    fn read(&mut self, buf: &mut [u8]) -> core::result::Result<usize, Self::Error> {
-        embedded_io::Read::read(&mut self.rx, buf)
-    }
-}
-
-impl embedded_io::Write for Uart<'_, Blocking> {
-    fn write(&mut self, buf: &[u8]) -> core::result::Result<usize, Self::Error> {
-        embedded_io::Write::write(&mut self.tx, buf)
-    }
-
-    fn flush(&mut self) -> core::result::Result<(), Self::Error> {
-        embedded_io::Write::flush(&mut self.tx)
-    }
-}
-
-impl embedded_io_async::ErrorType for UartRx<'_, Async> {
-    type Error = Error;
-}
-
-impl embedded_io_async::ErrorType for UartTx<'_, Async> {
-    type Error = Error;
-}
-
-impl embedded_io_async::ErrorType for Uart<'_, Async> {
-    type Error = Error;
-}
-
-impl embedded_io_async::Read for UartRx<'_, Async> {
-    async fn read(&mut self, buf: &mut [u8]) -> core::result::Result<usize, Self::Error> {
-        self.read(buf).await.map(|_| buf.len())
-    }
-}
-
-impl embedded_io_async::Write for UartTx<'_, Async> {
-    async fn write(&mut self, buf: &[u8]) -> core::result::Result<usize, Self::Error> {
-        self.write(buf).await.map(|_| buf.len())
-    }
-
-    async fn flush(&mut self) -> core::result::Result<(), Self::Error> {
-        self.flush().await
-    }
-}
-
-impl embedded_io_async::Read for Uart<'_, Async> {
-    async fn read(&mut self, buf: &mut [u8]) -> core::result::Result<usize, Self::Error> {
-        embedded_io_async::Read::read(&mut self.rx, buf).await
-    }
-}
-
-impl embedded_io_async::Write for Uart<'_, Async> {
-    async fn write(&mut self, buf: &[u8]) -> core::result::Result<usize, Self::Error> {
-        embedded_io_async::Write::write(&mut self.tx, buf).await
-    }
-
-    async fn flush(&mut self) -> core::result::Result<(), Self::Error> {
-        embedded_io_async::Write::flush(&mut self.tx).await
-    }
-}
-
 struct Info {
     regs: &'static crate::pac::usart0::RegisterBlock,
     index: usize,
+    refcnt: AtomicU8,
 }
 
 trait SealedInstance {
@@ -1151,6 +1066,7 @@ macro_rules! impl_instance {
                         Info {
                             regs: unsafe { &*crate::pac::[<Usart $n>]::ptr() },
                             index: $n,
+			    refcnt: AtomicU8::new(0),
                         }
                     }
 
@@ -1170,33 +1086,28 @@ macro_rules! impl_instance {
 
 impl_instance!(0, 1, 2, 3, 4, 5, 6, 7);
 
-mod sealed {
-    /// simply seal a trait
-    pub trait Sealed {}
-}
-
-impl<T: Pin> sealed::Sealed for T {}
+impl<T: Pin> Sealed for T {}
 
 /// io configuration trait for Uart Tx configuration
-pub trait TxPin<T: Instance>: Pin + sealed::Sealed + PeripheralType {
+pub trait TxPin<T: Instance>: Pin + Sealed + PeripheralType {
     /// convert the pin to appropriate function for Uart Tx  usage
     fn as_tx(&self);
 }
 
 /// io configuration trait for Uart Rx configuration
-pub trait RxPin<T: Instance>: Pin + sealed::Sealed + PeripheralType {
+pub trait RxPin<T: Instance>: Pin + Sealed + PeripheralType {
     /// convert the pin to appropriate function for Uart Rx  usage
     fn as_rx(&self);
 }
 
 /// io configuration trait for Uart Cts
-pub trait CtsPin<T: Instance>: Pin + sealed::Sealed + PeripheralType {
+pub trait CtsPin<T: Instance>: Pin + Sealed + PeripheralType {
     /// convert the pin to appropriate function for Uart Cts usage
     fn as_cts(&self);
 }
 
 /// io configuration trait for Uart Rts
-pub trait RtsPin<T: Instance>: Pin + sealed::Sealed + PeripheralType {
+pub trait RtsPin<T: Instance>: Pin + Sealed + PeripheralType {
     /// convert the pin to appropriate function for Uart Rts usage
     fn as_rts(&self);
 }
@@ -1273,11 +1184,11 @@ impl_pin_trait!(FLEXCOMM7, rts, PIO4_4, F1);
 
 /// UART Tx DMA trait.
 #[allow(private_bounds)]
-pub trait TxDma<T: Instance>: dma::Instance {}
+pub trait TxDma<T: Instance>: crate::dma::Channel {}
 
 /// UART Rx DMA trait.
 #[allow(private_bounds)]
-pub trait RxDma<T: Instance>: dma::Instance {}
+pub trait RxDma<T: Instance>: crate::dma::Channel {}
 
 macro_rules! impl_dma {
     ($fcn:ident, $mode:ident, $dma:ident) => {

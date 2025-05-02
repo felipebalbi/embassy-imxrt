@@ -163,3 +163,25 @@ pub fn init(config: config::Config) -> Peripherals {
 
     peripherals
 }
+
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
+#[cfg(feature = "rt")]
+struct BitIter(u32);
+
+#[cfg(feature = "rt")]
+impl Iterator for BitIter {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.0.trailing_zeros() {
+            32 => None,
+            b => {
+                self.0 &= !(1 << b);
+                Some(b)
+            }
+        }
+    }
+}

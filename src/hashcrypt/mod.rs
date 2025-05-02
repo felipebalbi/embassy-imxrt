@@ -4,6 +4,7 @@ use core::marker::PhantomData;
 use hasher::Hasher;
 
 use crate::clocks::enable_and_reset;
+use crate::dma::AnyChannel;
 use crate::peripherals::{DMA0_CH30, HASHCRYPT};
 use crate::{dma, pac, Peri};
 
@@ -28,14 +29,14 @@ impl Mode for Async {}
 
 /// Trait for compatible DMA channels
 #[allow(private_bounds)]
-pub trait HashcryptDma: Sealed + dma::Instance {}
+pub trait HashcryptDma: dma::Channel {}
 impl Sealed for DMA0_CH30 {}
 impl HashcryptDma for DMA0_CH30 {}
 
 /// Hashcrypt driver
 pub struct Hashcrypt<'d, M: Mode> {
     hashcrypt: pac::Hashcrypt,
-    dma_ch: Option<dma::channel::Channel<'d>>,
+    dma_ch: Option<Peri<'d, AnyChannel>>,
     _peripheral: Peri<'d, HASHCRYPT>,
     _mode: PhantomData<M>,
 }
@@ -58,7 +59,7 @@ impl From<Algorithm> for u8 {
 
 impl<'d, M: Mode> Hashcrypt<'d, M> {
     /// Instantiate new Hashcrypt peripheral
-    fn new_inner(peripheral: Peri<'d, HASHCRYPT>, dma_ch: Option<dma::channel::Channel<'d>>) -> Self {
+    fn new_inner(peripheral: Peri<'d, HASHCRYPT>, dma_ch: Option<Peri<'d, AnyChannel>>) -> Self {
         enable_and_reset::<HASHCRYPT>();
 
         Self {
@@ -98,7 +99,7 @@ impl<'d> Hashcrypt<'d, Blocking> {
 impl<'d> Hashcrypt<'d, Async> {
     /// Create a new instance
     pub fn new_async(peripheral: Peri<'d, HASHCRYPT>, dma_ch: Peri<'d, impl HashcryptDma>) -> Self {
-        Self::new_inner(peripheral, dma::Dma::reserve_channel(dma_ch))
+        Self::new_inner(peripheral, Some(dma_ch.into()))
     }
 
     /// Start a new SHA256 hash

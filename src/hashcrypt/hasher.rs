@@ -7,7 +7,6 @@ use embassy_futures::select::select;
 
 use super::{Async, Blocking, Hashcrypt, Mode};
 use crate::dma;
-use crate::dma::transfer::{Transfer, Width};
 
 /// Block length
 pub const BLOCK_LEN: usize = 64;
@@ -132,17 +131,8 @@ impl<'d, 'a> Hasher<'d, 'a, Async> {
             panic!("Invalid data length");
         }
 
-        let options = dma::transfer::TransferOptions {
-            width: Width::Bit32,
-            ..Default::default()
-        };
-
-        let transfer = Transfer::new_write(
-            self.hashcrypt.dma_ch.as_ref().unwrap(),
-            data,
-            self.hashcrypt.hashcrypt.indata().as_ptr() as *mut u8,
-            options,
-        );
+        let ch = self.hashcrypt.dma_ch.as_mut().unwrap().reborrow();
+        let transfer = unsafe { dma::write(ch, data, self.hashcrypt.hashcrypt.indata().as_ptr() as *mut u8) };
 
         select(
             transfer,
