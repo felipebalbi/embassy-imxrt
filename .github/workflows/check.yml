@@ -79,7 +79,7 @@ jobs:
       - name: cargo clippy
         working-directory: ${{ matrix.workdir }}
         run: |
-          cargo clippy --locked -- -Dwarnings -F clippy::suspicious -F clippy::correctness -F clippy::perf -F clippy::style
+          cargo clippy --locked -- -Dwarnings -D clippy::suspicious -D clippy::correctness -D clippy::perf -D clippy::style
 
   # Enable once we have a released crate
   # semver:
@@ -134,6 +134,9 @@ jobs:
 
       - name: Install stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
 
       - name: rustup target add thumbv8m.main-none-eabihf
         run: rustup target add thumbv8m.main-none-eabihf
