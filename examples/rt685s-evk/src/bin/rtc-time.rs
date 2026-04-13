@@ -7,7 +7,7 @@ use embassy_executor::Spawner;
 use embassy_imxrt::rtc::Rtc;
 use embassy_imxrt_examples as _;
 use embassy_time::Timer;
-use embedded_mcu_hal::time::{Datetime, DatetimeClock, Month, UncheckedDatetime};
+use embedded_mcu_hal::time::{Datetime, DatetimeClock, DatetimeFields, Month};
 use panic_probe as _;
 
 #[embassy_executor::main]
@@ -20,7 +20,7 @@ async fn main(_spawner: Spawner) {
 
     // Datetime clock example
     {
-        let datetime = Datetime::new(UncheckedDatetime {
+        let datetime = Datetime::new(DatetimeFields {
             year: 2024,
             month: Month::December,
             day: 4,
@@ -29,14 +29,14 @@ async fn main(_spawner: Spawner) {
         })
         .unwrap();
 
-        let ret = dt_clock.set_current_datetime(&datetime);
+        let ret = dt_clock.set(datetime);
         info!("RTC set time: {:?}", datetime);
         assert!(ret.is_ok());
 
         info!("Wait for 5 seconds");
         Timer::after_millis(DEMO_DELAY_MS).await;
 
-        let result = dt_clock.get_current_datetime();
+        let result = dt_clock.now();
         assert!(result.is_ok());
         info!("RTC get time: {:?}", result.unwrap());
     }
@@ -54,14 +54,14 @@ async fn main(_spawner: Spawner) {
 
         assert!(chrono::NaiveDateTime::from(embassy_dt) == chrono_dt);
 
-        let ret = dt_clock.set_current_datetime(&embassy_dt);
+        let ret = dt_clock.set(embassy_dt);
         info!("RTC set time as chrono::NaiveDateTime: {:?}", embassy_dt);
         assert!(ret.is_ok());
 
         info!("Wait for 5 seconds");
         Timer::after_millis(DEMO_DELAY_MS).await;
 
-        let result = dt_clock.get_current_datetime();
+        let result = dt_clock.now();
         assert!(result.is_ok());
         info!("RTC get time: {:?}", result.unwrap());
     }

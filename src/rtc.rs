@@ -4,8 +4,8 @@ use core::marker::PhantomData;
 
 use embassy_hal_internal::interrupt::InterruptExt;
 use embassy_sync::waitqueue::AtomicWaker;
+use embedded_mcu_hal::nvram::{Nvram, NvramStorage};
 use embedded_mcu_hal::time::{Datetime, DatetimeClock, DatetimeClockError};
-use embedded_mcu_hal::{Nvram, NvramStorage};
 
 use crate::{Peri, interrupt, pac, peripherals};
 
@@ -227,20 +227,20 @@ impl<'r> RtcDatetimeClock<'r> {
 
 impl DatetimeClock for RtcDatetimeClock<'_> {
     /// Returns the current structured date and time.
-    fn get_current_datetime(&self) -> Result<Datetime, DatetimeClockError> {
-        Ok(Datetime::from_unix_time_seconds(self.get_datetime_in_secs()?))
+    fn now(&self) -> Result<Datetime, DatetimeClockError> {
+        Ok(Datetime::from_unix_timestamp(self.get_datetime_in_secs()?))
     }
 
     /// Sets the current structured date and time.
-    fn set_current_datetime(&mut self, datetime: &Datetime) -> Result<(), DatetimeClockError> {
-        self.set_datetime_in_secs(datetime.to_unix_time_seconds())
+    fn set(&mut self, datetime: Datetime) -> Result<(), DatetimeClockError> {
+        self.set_datetime_in_secs(datetime.unix_timestamp())
     }
 
     // TODO As currently implemented, we only return times with 1s resolution.  However, the hardware is capable of 1KHz
     //      resolution in some configurations.  In the future, we may consider adding a feature flag to enable setting
     //      timestamps with 1KHz resolution, but we don't currently have a use case for that.
     //
-    fn max_resolution_hz(&self) -> u32 {
+    fn resolution_hz(&self) -> u32 {
         1
     }
 }

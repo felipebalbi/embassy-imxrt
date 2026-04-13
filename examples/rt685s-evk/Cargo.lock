@@ -541,8 +541,9 @@ dependencies = [
 
 [[package]]
 name = "embedded-mcu-hal"
-version = "0.1.0"
-source = "git+https://github.com/OpenDevicePartnership/embedded-mcu#6956ebdaf9d3725959dae2c57c2ab6baefae9330"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f02b992c2b871b7fc616e4539258d92ea8b085e2f09cc0ad2862aa4d0e185ad1"
 dependencies = [
  "chrono",
  "defmt",

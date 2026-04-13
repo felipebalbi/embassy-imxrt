@@ -9,7 +9,7 @@ use embassy_executor::Spawner;
 use embassy_imxrt::rtc::{Rtc, RtcDatetimeClock};
 use embassy_imxrt_examples as _;
 use embassy_time::Timer;
-use embedded_mcu_hal::time::{Datetime, DatetimeClock, DatetimeClockError, Month, UncheckedDatetime};
+use embedded_mcu_hal::time::{Datetime, DatetimeClock, DatetimeClockError, DatetimeFields, Month};
 use panic_probe as _;
 
 /// RTC alarm struct to await the time alarm wakeup location
@@ -22,9 +22,9 @@ struct RtcAlarm<'r> {
 impl<'r> Future for RtcAlarm<'r> {
     type Output = Result<(), DatetimeClockError>;
     fn poll(self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
-        match self.rtc.get_current_datetime() {
+        match self.rtc.now() {
             Ok(now) => {
-                if self.expires_at <= now.to_unix_time_seconds() {
+                if self.expires_at <= now.unix_timestamp() {
                     Poll::Ready(Ok(()))
                 } else {
                     info!("Alarm pending at time {}, expires at {}", now, self.expires_at);
@@ -48,7 +48,7 @@ async fn main(_spawner: Spawner) {
     let (dt_clock, _rtc_nvram) = r.split();
 
     // Initialize the system RTC
-    let datetime = Datetime::new(UncheckedDatetime {
+    let datetime = Datetime::new(DatetimeFields {
         year: 2026,
         month: Month::January,
         day: 12,
@@ -56,21 +56,18 @@ async fn main(_spawner: Spawner) {
         ..Default::default()
     })
     .unwrap();
-    let ret = dt_clock.set_current_datetime(&datetime);
+    let ret = dt_clock.set(datetime);
     info!("RTC set time: {:?}", datetime);
     assert!(ret.is_ok());
 
     // Show RTC functioning: Display current time before setting alarm
-    let current_time = dt_clock.get_current_datetime().unwrap();
+    let current_time = dt_clock.now().unwrap();
     info!("Current time before alarm: {:?}", current_time);
 
     info!("Waiting 5 seconds...");
     Timer::after_secs(5).await; // This timer uses the OsTimer peripheral
 
-    info!(
-        "Current time after waiting: {:?}",
-        dt_clock.get_current_datetime().unwrap()
-    );
+    info!("Current time after waiting: {:?}", dt_clock.now().unwrap());
 
     // Set an RTC alarm to trigger after ALARM_SECONDS
     info!("Setting alarm to trigger in {} seconds...", ALARM_SECONDS);
@@ -86,7 +83,7 @@ async fn main(_spawner: Spawner) {
     alarm.await.expect("Alarm failed");
 
     // Display time after alarm triggered
-    let wake_time = dt_clock.get_current_datetime().unwrap();
+    let wake_time = dt_clock.now().unwrap();
     info!("Alarm triggered! Wake time: {:?}", wake_time);
 
     // Clear the alarm

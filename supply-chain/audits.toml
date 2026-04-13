@@ -65,6 +65,11 @@ criteria = "safe-to-deploy"
 delta = "0.6.1 -> 0.7.0"
 notes = "Made Write::flush() required. Update to embedded-io 0.7 with core::Error. defmt 0.3->1.0. Fixed method forwardings. Removed nightly requirement (MSRV 1.81). Trusted publisher (Dirbaio from Embedded WG)."
 
+[[audits.embedded-mcu-hal]]
+who = "Jerry Xie <jerryxie@microsoft.com>"
+criteria = "safe-to-deploy"
+version = "0.2.0"
+
 [[audits.mimxrt600-fcb]]
 who = "Jerry Xie <jerryxie@microsoft.com>"
 criteria = "safe-to-deploy"

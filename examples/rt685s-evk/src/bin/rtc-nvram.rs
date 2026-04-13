@@ -10,7 +10,7 @@ use embassy_imxrt_examples as _;
 use embassy_sync::blocking_mutex::{CriticalSectionMutex, Mutex};
 use embassy_sync::once_lock::OnceLock;
 use embassy_time::{Duration, Timer};
-use embedded_mcu_hal::{Nvram, NvramStorage};
+use embedded_mcu_hal::nvram::{Nvram, NvramStorage};
 use panic_probe as _;
 use static_cell::StaticCell;
 
