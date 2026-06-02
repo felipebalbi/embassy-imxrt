@@ -7,7 +7,7 @@
 //! inherent example:
 //!
 //! * `listen()` returns a `Request<SevenBitAddress>` carrying the matched
-//!   address; the example logs it.
+//!   address; the example logs it at `debug!` (silent at `DEFMT_LOG=info`).
 //! * `respond_to_write()` / `respond_to_read()` return `WriteStatus` /
 //!   `ReadStatus` enums that distinguish `Stopped` / `Restarted` /
 //!   `BufferFull` (for writes) and `Complete` / `NeedMore` / `EarlyStop`
@@ -34,9 +34,36 @@
 //!    did **not** report `Restarted(_)`. The queued edge that produces
 //!    `RepeatedStart` should always have a matching upstream `Restarted`.
 //!
-//! Pair this binary with `tools/i2c-target-test write-read-soak` for the
-//! reproducer; `defmt-print` the RTT channel to capture the on-target
-//! event history when the soak fails fast.
+//! ## Soak workflow (Mole rig)
+//!
+//! Pair this binary with the `i2c-soak.moleasm` program in the sibling
+//! `mole` repository — a Mole bit-cycle-engine controller-role soak that
+//! drives back-to-back combined-format write(32) / Sr / read(32)
+//! transactions at 400 kHz with the tightest legal tBUF, looping until
+//! the slave NACKs (which is how a wedged slave manifests to the
+//! controller). The Mole HALT status + MARK count identify the wedge
+//! iteration; the slave-side RACE WATCH `warn!` lines (if any) identify
+//! the mis-classification that fired.
+//!
+//! Build this example with `DEFMT_LOG=info` (the default for `cargo run`
+//! via `examples/rt685s-evk/.cargo/config.toml` is `trace`, which keeps
+//! per-transaction `debug!` chatter on the wire — that adds ~5 RTT lines
+//! per Mole transaction and at ~1300 tx/sec risks blocking the slave
+//! between STOP and the next address phase inside Mole's 1.875 µs tBUF
+//! window). At `info` level: only the 255-transaction heartbeat and the
+//! two RACE WATCH `warn!` lines are emitted; the rest is compile-time
+//! no-ops.
+//!
+//! ```sh
+//! # Override the trace default for the soak build:
+//! set DEFMT_LOG=info
+//! cargo run --release --bin i2c-slave-async-target-trait
+//! ```
+//!
+//! The companion `tools/i2c-target-test write-read-soak` host harness
+//! (USB-bound, ~1 tx/ms ceiling) remains useful for the broader regression
+//! sweep where per-transaction logging IS desired. Use Mole for the tight
+//! reproducer; use the host harness for the variety pass.
 //!
 //! Tested against the same Raspberry Pi 5 master rig as the existing
 //! `i2c-slave-async.rs` example
@@ -45,7 +72,7 @@
 #![no_std]
 #![no_main]
 
-use defmt::{info, warn};
+use defmt::{debug, info, warn};
 use defmt_rtt as _;
 use embassy_executor::Spawner;
 use embassy_imxrt::i2c::slave::{Address, I2cSlave};
@@ -60,7 +87,12 @@ use embedded_mcu_hal::i2c::target::asynch::I2c as TargetI2c;
 use panic_probe as _;
 
 const SLAVE_ADDR: Option<Address> = Address::new(0x20);
-const BUFLEN: usize = 8;
+const BUFLEN: usize = 32;
+
+/// Emit a heartbeat `info!` every `HEARTBEAT_EVERY` completed transactions.
+/// Mirrors the Mole-side `MARK label=0xAA` cadence (also 255) so the two
+/// streams correlate 1:1 in the captured logs.
+const HEARTBEAT_EVERY: u32 = 255;
 
 bind_interrupts!(struct Irqs {
     FLEXCOMM2 => i2c::InterruptHandler<peripherals::FLEXCOMM2>;
@@ -75,8 +107,21 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
     // telemetry" docs.
     let mut expect_repeated_start = false;
 
+    // Counter for completed transactions (write + Sr + read on the
+    // combined-format path; or just a single Write / Read / Stop on the
+    // simple paths). Drives the heartbeat `info!` used to correlate
+    // with the Mole `MARK label=0xAA` heartbeat in the soak workflow.
+    // u32 covers ~46 days of continuous 1000 tx/sec soak before wrap;
+    // for the v1 PR this is plenty.
+    let mut tx_count: u32 = 0;
+
+    info!(
+        "i2cs target-trait soak listening @ 0x20; heartbeat every {} transactions",
+        HEARTBEAT_EVERY
+    );
+
     loop {
-        let mut buf: [u8; BUFLEN] = [0xAA; BUFLEN];
+        let mut buf: [u8; BUFLEN] = [0u8; BUFLEN];
 
         for (i, e) in buf.iter_mut().enumerate() {
             *e = i as u8;
@@ -89,7 +134,7 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
         let req: Request<SevenBitAddress> = match TargetI2c::<SevenBitAddress>::listen(&mut i2c).await {
             Ok(r) => r,
             Err(e) => {
-                info!("listen error: {:?}", defmt::Debug2Format(&e));
+                warn!("listen error: {:?}", defmt::Debug2Format(&e));
                 expect_repeated_start = false;
                 continue;
             }
@@ -103,7 +148,7 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
                 // A probe (address-only transaction terminated by STOP)
                 // surfaces here. The inherent API reports the same event
                 // as `Command::Probe { addr }`.
-                info!("Stop @ 0x{:02X} (probe)", addr);
+                debug!("Stop @ 0x{:02X} (probe)", addr);
                 if was_expecting_restart {
                     warn!(
                         "RACE WATCH: prior respond_to_* reported Restarted but listen() \
@@ -114,7 +159,7 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
             }
             Request::RepeatedStart(prev_addr) => {
                 // Surfaced when a previous respond_to_* observed a Sr.
-                info!("RepeatedStart from prev @ 0x{:02X}", prev_addr);
+                debug!("RepeatedStart from prev @ 0x{:02X}", prev_addr);
                 if !was_expecting_restart {
                     warn!(
                         "RACE WATCH: RepeatedStart(0x{:02X}) surfaced without a prior \
@@ -125,26 +170,28 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
                 }
             }
             Request::Read(addr) => {
-                info!("Read @ 0x{:02X}", addr);
+                debug!("Read @ 0x{:02X}", addr);
                 if was_expecting_restart {
                     // A Read after a Restarted is a normal combined-format
                     // transaction; the RepeatedStart event was consumed
                     // implicitly by the trait impl.
-                    info!("(consumed expected RepeatedStart edge before Read)");
+                    debug!("(consumed expected RepeatedStart edge before Read)");
                 }
                 loop {
                     use embedded_mcu_hal::i2c::target::ReadStatus;
                     match TargetI2c::<SevenBitAddress>::respond_to_read(&mut i2c, &buf).await {
                         Ok(ReadStatus::Complete(n)) => {
-                            info!("Read complete with {} bytes", n);
+                            debug!("Read complete with {} bytes", n);
+                            tx_count = tx_count.wrapping_add(1);
                             break;
                         }
                         Ok(ReadStatus::EarlyStop(n)) => {
-                            info!("Read terminated by controller after {} bytes", n);
+                            debug!("Read terminated by controller after {} bytes", n);
+                            tx_count = tx_count.wrapping_add(1);
                             break;
                         }
                         Ok(ReadStatus::NeedMore(n)) => {
-                            info!("Read NeedMore: sent {} bytes so far, more requested", n);
+                            debug!("Read NeedMore: sent {} bytes so far, more requested", n);
                             // Loop and supply more bytes. In a real
                             // application you would prepare the next chunk
                             // here; for the demo we just resend `buf`.
@@ -152,30 +199,31 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
                         Ok(_) => {
                             // ReadStatus is `#[non_exhaustive]`; future
                             // variants are gracefully ignored.
-                            info!("Read: unknown status variant");
+                            warn!("Read: unknown status variant");
                             break;
                         }
                         Err(e) => {
-                            info!("respond_to_read error: {:?}", defmt::Debug2Format(&e));
+                            warn!("respond_to_read error: {:?}", defmt::Debug2Format(&e));
                             break;
                         }
                     }
                 }
             }
             Request::Write(addr) => {
-                info!("Write @ 0x{:02X}", addr);
+                debug!("Write @ 0x{:02X}", addr);
                 if was_expecting_restart {
-                    info!("(consumed expected RepeatedStart edge before Write)");
+                    debug!("(consumed expected RepeatedStart edge before Write)");
                 }
                 loop {
                     use embedded_mcu_hal::i2c::target::WriteStatus;
                     match TargetI2c::<SevenBitAddress>::respond_to_write(&mut i2c, &mut buf).await {
                         Ok(WriteStatus::Stopped(n)) => {
-                            info!("Write stopped after {} bytes", n);
+                            debug!("Write stopped after {} bytes", n);
+                            tx_count = tx_count.wrapping_add(1);
                             break;
                         }
                         Ok(WriteStatus::Restarted(n)) => {
-                            info!(
+                            debug!(
                                 "Write restarted after {} bytes — next listen will surface RepeatedStart",
                                 n
                             );
@@ -197,20 +245,24 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
                             // transfers — e.g. after dropping a
                             // respond_to_* future mid-transaction.
                             expect_repeated_start = true;
+                            // Don't count: the read leg of the combined
+                            // transaction will increment tx_count when it
+                            // completes. Counting here would double-count
+                            // every write+read pair.
                             break;
                         }
                         Ok(WriteStatus::BufferFull(n)) => {
-                            info!("Write BufferFull after {} bytes — supplying more buffer space", n);
+                            debug!("Write BufferFull after {} bytes — supplying more buffer space", n);
                             // Loop and continue draining.
                         }
                         Ok(_) => {
                             // WriteStatus is `#[non_exhaustive]`; future
                             // variants are gracefully ignored.
-                            info!("Write: unknown status variant");
+                            warn!("Write: unknown status variant");
                             break;
                         }
                         Err(e) => {
-                            info!("respond_to_write error: {:?}", defmt::Debug2Format(&e));
+                            warn!("respond_to_write error: {:?}", defmt::Debug2Format(&e));
                             break;
                         }
                     }
@@ -219,8 +271,16 @@ async fn slave_service(mut i2c: I2cSlave<'static, Async>) {
             // GeneralCall / SmbusAlert are not produced by this peripheral
             // in v1; the catch-all covers any future variants.
             _ => {
-                info!("unhandled request variant");
+                warn!("unhandled request variant");
             }
+        }
+
+        // Heartbeat: one info! per HEARTBEAT_EVERY completed transactions.
+        // Aligns 1:1 with Mole's `MARK label=0xAA` cadence so log streams
+        // correlate. Uses `is_multiple_of` for readability; the modulo
+        // path is identical machine code.
+        if tx_count > 0 && tx_count.is_multiple_of(HEARTBEAT_EVERY) {
+            info!("soak heartbeat: {} transactions completed", tx_count);
         }
     }
 }
