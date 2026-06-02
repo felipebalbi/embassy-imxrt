@@ -1,0 +1,13 @@
+[package]
+name = "i2c-target-test"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Host-side I2C controller test app that exercises the embassy-imxrt I2cSlave target trait examples via a Pico de Gallo USB bridge"
+publish = false
+
+[dependencies]
+pico-de-gallo-lib = "0.5.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "signal"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
